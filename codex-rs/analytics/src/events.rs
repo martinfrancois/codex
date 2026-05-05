@@ -488,9 +488,9 @@ pub(crate) enum Reviewer {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReviewTrigger {
     Initial,
-    SandboxRetry,
-    NetworkRetry,
-    SubcommandExecve,
+    SandboxDenial,
+    NetworkPolicyDenial,
+    ExecveIntercept,
 }
 
 #[allow(dead_code)]
