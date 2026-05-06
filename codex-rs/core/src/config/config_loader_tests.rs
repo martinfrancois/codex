@@ -781,6 +781,8 @@ allowed_approval_policies = ["on-request"]
                 hooks: None,
                 mcp_servers: None,
                 plugins: None,
+                skills: None,
+                plugin_marketplaces: None,
                 apps: None,
                 rules: None,
                 enforce_residency: None,
