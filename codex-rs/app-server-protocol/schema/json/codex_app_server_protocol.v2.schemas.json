@@ -9050,6 +9050,26 @@
       ],
       "type": "object"
     },
+    "PluginMarketplaceRequirements": {
+      "properties": {
+        "allowUserAdditions": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedNames": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "PluginReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -12732,6 +12752,16 @@
       ],
       "type": "string"
     },
+    "SkillSourceRequirement": {
+      "enum": [
+        "user",
+        "repo",
+        "system",
+        "admin",
+        "plugin"
+      ],
+      "type": "string"
+    },
     "SkillSummary": {
       "properties": {
         "description": {
@@ -12952,6 +12982,20 @@
         "data"
       ],
       "title": "SkillsListResponse",
+      "type": "object"
+    },
+    "SkillsRequirements": {
+      "properties": {
+        "allowedSources": {
+          "items": {
+            "$ref": "#/definitions/SkillSourceRequirement"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "SortDirection": {
