@@ -521,8 +521,8 @@ pub(crate) struct CodexReviewEventParams {
     pub(crate) reviewer: Reviewer,
     pub(crate) trigger: ReviewTrigger,
     pub(crate) status: ReviewStatus,
-    pub(crate) created_at: u64,
-    pub(crate) completed_at: Option<u64>,
+    pub(crate) started_at_ms: Option<u64>,
+    pub(crate) completed_at_ms: u64,
     pub(crate) duration_ms: Option<u64>,
 }
 
