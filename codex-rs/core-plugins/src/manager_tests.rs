@@ -23,6 +23,9 @@ use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::McpServerConfig;
 use codex_config::McpServerToolConfig;
+use codex_config::PluginMarketplaceRequirementsToml;
+use codex_config::RequirementSource;
+use codex_config::Sourced;
 use codex_config::types::McpServerTransportConfig;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::Product;
@@ -139,6 +142,32 @@ async fn load_plugins_from_config(config_toml: &str, codex_home: &Path) -> Plugi
     PluginsManager::new(codex_home.to_path_buf())
         .plugins_for_config(&config)
         .await
+}
+
+fn plugins_config_with_requirements(
+    codex_home: &Path,
+    user_config: Value,
+    requirements: ConfigRequirements,
+) -> PluginsConfigInput {
+    let config_path =
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(codex_home.join(CONFIG_TOML_FILE))
+            .expect("config path should be absolute");
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::User { file: config_path },
+            user_config,
+        )],
+        requirements,
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    PluginsConfigInput::new(
+        config_layer_stack,
+        /*plugins_enabled*/ true,
+        /*remote_plugin_enabled*/ false,
+        /*plugin_hooks_enabled*/ false,
+        "https://chatgpt.com/backend-api/".to_string(),
+    )
 }
 
 async fn load_config(codex_home: &Path, cwd: &Path) -> PluginsConfigInput {
@@ -1574,6 +1603,102 @@ enabled = false
             ],
         }
     );
+}
+
+#[tokio::test]
+async fn managed_marketplace_allowlist_hides_and_disables_unapproved_plugins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("repo");
+    fs::create_dir_all(repo_root.join(".git")).unwrap();
+    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    write_plugin(
+        &tmp.path().join("plugins/cache/debug"),
+        "sample/local",
+        "sample",
+    );
+    fs::write(
+        repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "debug",
+  "plugins": [
+    {
+      "name": "sample",
+      "source": {
+        "source": "local",
+        "path": "./sample"
+      }
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    let config = plugins_config_with_requirements(
+        tmp.path(),
+        toml::toml! {
+            [plugins."sample@debug"]
+            enabled = true
+        }
+        .into(),
+        ConfigRequirements {
+            plugin_marketplaces: Some(Sourced::new(
+                PluginMarketplaceRequirementsToml {
+                    allowed_names: Some(vec!["openai-curated".to_string()]),
+                    allow_user_additions: Some(false),
+                },
+                RequirementSource::Unknown,
+            )),
+            ..Default::default()
+        },
+    );
+    let manager = PluginsManager::new(tmp.path().to_path_buf());
+
+    let outcome = manager.plugins_for_config(&config).await;
+    assert_eq!(outcome.plugins(), &[]);
+
+    let marketplaces = manager
+        .list_marketplaces_for_config(&config, &[AbsolutePathBuf::try_from(repo_root).unwrap()])
+        .unwrap()
+        .marketplaces;
+    assert_eq!(marketplaces, Vec::new());
+
+    let err = manager
+        .read_plugin_for_config(
+            &config,
+            &PluginReadRequest {
+                plugin_name: "sample".to_string(),
+                marketplace_path: AbsolutePathBuf::try_from(
+                    tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .expect_err("disallowed marketplace should not be readable");
+    assert!(matches!(
+        err,
+        MarketplaceError::MarketplaceBlocked { marketplace_name }
+            if marketplace_name == "debug"
+    ));
+
+    let err = manager
+        .install_plugin_for_config(
+            &config,
+            PluginInstallRequest {
+                plugin_name: "sample".to_string(),
+                marketplace_path: AbsolutePathBuf::try_from(
+                    tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .expect_err("disallowed marketplace should not be installable");
+    assert!(matches!(
+        err,
+        PluginInstallError::Marketplace(MarketplaceError::MarketplaceBlocked {
+            marketplace_name
+        }) if marketplace_name == "debug"
+    ));
 }
 
 #[tokio::test]

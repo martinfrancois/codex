@@ -6,7 +6,12 @@ use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
+use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_config::RequirementSource;
+use codex_config::SkillSourceRequirement;
+use codex_config::SkillsRequirementsToml;
+use codex_config::Sourced;
 use codex_exec_server::LOCAL_FS;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
@@ -22,6 +27,13 @@ use tempfile::TempDir;
 
 fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
     let skill_dir = codex_home.path().join("skills").join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+fn write_repo_skill(cwd: &TempDir, dir: &str, name: &str, description: &str) {
+    let skill_dir = cwd.path().join(".agents/skills").join(dir);
     fs::create_dir_all(&skill_dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
@@ -94,9 +106,17 @@ fn user_config_layer(codex_home: &TempDir, config_toml: &str) -> ConfigLayerEntr
 }
 
 fn config_stack(codex_home: &TempDir, user_config_toml: &str) -> ConfigLayerStack {
+    config_stack_with_requirements(codex_home, user_config_toml, ConfigRequirements::default())
+}
+
+fn config_stack_with_requirements(
+    codex_home: &TempDir,
+    user_config_toml: &str,
+    requirements: ConfigRequirements,
+) -> ConfigLayerStack {
     ConfigLayerStack::new(
         vec![user_config_layer(codex_home, user_config_toml)],
-        Default::default(),
+        requirements,
         ConfigRequirementsToml::default(),
     )
     .expect("valid config layer stack")
@@ -260,6 +280,65 @@ async fn skills_for_config_disables_plugin_skills_by_name() {
             .iter()
             .any(|allowed_skill| allowed_skill.path_to_skills_md == skill.path_to_skills_md)
     );
+}
+
+#[tokio::test]
+async fn skills_for_config_filters_disallowed_managed_sources() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    write_user_skill(&codex_home, "user", "user-skill", "from user");
+    write_repo_skill(&cwd, "repo", "repo-skill", "from repo");
+    let plugin_skill_path = write_plugin_skill(
+        &codex_home,
+        "test",
+        "sample",
+        "plugin",
+        "plugin-skill",
+        "from plugin",
+    );
+    let config_layer_stack = config_stack_with_requirements(
+        &codex_home,
+        "",
+        ConfigRequirements {
+            skills: Some(Sourced::new(
+                SkillsRequirementsToml {
+                    allowed_sources: Some(vec![
+                        SkillSourceRequirement::System,
+                        SkillSourceRequirement::Admin,
+                        SkillSourceRequirement::Plugin,
+                    ]),
+                },
+                RequirementSource::Unknown,
+            )),
+            ..Default::default()
+        },
+    );
+    let skills_manager = SkillsManager::new(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let outcome = skills_for_config_with_stack(
+        &skills_manager,
+        &cwd,
+        &config_layer_stack,
+        &[plugin_skill_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("plugin skills root")
+            .to_path_buf()
+            .abs()],
+    )
+    .await;
+    let skill_names = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<HashSet<_>>();
+
+    assert!(skill_names.contains("sample:plugin-skill"));
+    assert!(!skill_names.contains("user-skill"));
+    assert!(!skill_names.contains("repo-skill"));
 }
 
 #[tokio::test]

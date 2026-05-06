@@ -589,7 +589,12 @@ impl PluginsManager {
             return HashMap::new();
         };
 
-        remote_installed_plugins_to_config(plugins, &self.store)
+        let plugins = plugins
+            .iter()
+            .filter(|plugin| marketplace_is_allowed(config, &plugin.marketplace_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        remote_installed_plugins_to_config(&plugins, &self.store)
     }
 
     fn write_remote_installed_plugins_cache(&self, plugins: Vec<RemoteInstalledPlugin>) -> bool {
@@ -801,6 +806,25 @@ impl PluginsManager {
         self.install_resolved_plugin(resolved).await
     }
 
+    pub async fn install_plugin_for_config(
+        &self,
+        config: &PluginsConfigInput,
+        request: PluginInstallRequest,
+    ) -> Result<PluginInstallOutcome, PluginInstallError> {
+        let resolved = find_installable_marketplace_plugin(
+            &request.marketplace_path,
+            &request.plugin_name,
+            self.restriction_product,
+        )?;
+        if !marketplace_is_allowed(config, &resolved.plugin_id.marketplace_name) {
+            return Err(MarketplaceError::MarketplaceBlocked {
+                marketplace_name: resolved.plugin_id.marketplace_name,
+            }
+            .into());
+        }
+        self.install_resolved_plugin(resolved).await
+    }
+
     pub async fn install_plugin_with_remote_sync(
         &self,
         config: &PluginsConfigInput,
@@ -960,7 +984,7 @@ impl PluginsManager {
         )
         .await
         .map_err(PluginRemoteSyncError::from)?;
-        let configured_plugins = configured_plugins_from_stack(&config.config_layer_stack);
+        let configured_plugins = configured_plugins_for_config(config);
         let curated_marketplace_root = curated_plugins_repo_path(self.codex_home.as_path());
         let curated_marketplace_path = AbsolutePathBuf::try_from(
             curated_marketplace_root.join(".agents/plugins/marketplace.json"),
@@ -1174,6 +1198,9 @@ impl PluginsManager {
             .marketplaces
             .into_iter()
             .filter_map(|marketplace| {
+                if !marketplace_is_allowed(config, &marketplace.name) {
+                    return None;
+                }
                 let marketplace_name = marketplace.name.clone();
                 let plugins = marketplace
                     .plugins
@@ -1228,6 +1255,11 @@ impl PluginsManager {
         }
 
         let plugin = find_marketplace_plugin(&request.marketplace_path, &request.plugin_name)?;
+        if !marketplace_is_allowed(config, &plugin.plugin_id.marketplace_name) {
+            return Err(MarketplaceError::MarketplaceBlocked {
+                marketplace_name: plugin.plugin_id.marketplace_name,
+            });
+        }
         if !self.restriction_product_matches(plugin.policy.products.as_deref()) {
             return Err(MarketplaceError::PluginNotFound {
                 plugin_name: plugin.plugin_id.plugin_name,
@@ -1491,8 +1523,10 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         marketplace_name: Option<&str>,
     ) -> Result<ConfiguredMarketplaceUpgradeOutcome, String> {
+        let configured_marketplace_names =
+            configured_git_marketplace_names(&config.config_layer_stack);
         if let Some(marketplace_name) = marketplace_name
-            && !configured_git_marketplace_names(&config.config_layer_stack)
+            && !configured_marketplace_names
                 .iter()
                 .any(|name| name == marketplace_name)
         {
@@ -1501,11 +1535,49 @@ impl PluginsManager {
             ));
         }
 
-        let mut outcome = upgrade_configured_git_marketplaces(
-            self.codex_home.as_path(),
-            &config.config_layer_stack,
-            marketplace_name,
-        );
+        let mut outcome = if config
+            .config_layer_stack
+            .requirements()
+            .plugin_marketplaces
+            .is_none()
+        {
+            upgrade_configured_git_marketplaces(
+                self.codex_home.as_path(),
+                &config.config_layer_stack,
+                marketplace_name,
+            )
+        } else {
+            let selected_marketplace_names = match marketplace_name {
+                Some(marketplace_name) => {
+                    if !marketplace_is_allowed(config, marketplace_name) {
+                        return Err(format!(
+                            "marketplace `{marketplace_name}` is not allowed by managed requirements"
+                        ));
+                    }
+                    vec![marketplace_name.to_string()]
+                }
+                None => configured_marketplace_names
+                    .into_iter()
+                    .filter(|marketplace_name| marketplace_is_allowed(config, marketplace_name))
+                    .collect::<Vec<_>>(),
+            };
+            let mut outcome = ConfiguredMarketplaceUpgradeOutcome::default();
+            for marketplace_name in selected_marketplace_names {
+                let mut marketplace_outcome = upgrade_configured_git_marketplaces(
+                    self.codex_home.as_path(),
+                    &config.config_layer_stack,
+                    Some(&marketplace_name),
+                );
+                outcome
+                    .selected_marketplaces
+                    .append(&mut marketplace_outcome.selected_marketplaces);
+                outcome
+                    .upgraded_roots
+                    .append(&mut marketplace_outcome.upgraded_roots);
+                outcome.errors.append(&mut marketplace_outcome.errors);
+            }
+            outcome
+        };
         if !outcome.upgraded_roots.is_empty() {
             match refresh_non_curated_plugin_cache_force_reinstall(
                 self.codex_home.as_path(),
@@ -1813,7 +1885,7 @@ impl PluginsManager {
         &self,
         config: &PluginsConfigInput,
     ) -> (HashSet<String>, HashSet<String>) {
-        let configured_plugins = configured_plugins_from_stack(&config.config_layer_stack);
+        let configured_plugins = configured_plugins_for_config(config);
         let installed_plugins = configured_plugins
             .keys()
             .filter(|plugin_key| {
@@ -1913,6 +1985,7 @@ impl PluginInstallError {
                     | MarketplaceError::InvalidMarketplaceFile { .. }
                     | MarketplaceError::PluginNotFound { .. }
                     | MarketplaceError::PluginNotAvailable { .. }
+                    | MarketplaceError::MarketplaceBlocked { .. }
                     | MarketplaceError::InvalidPlugin(_)
             ) | Self::Store(PluginStoreError::Invalid(_))
         )
@@ -1955,6 +2028,26 @@ pub(crate) fn configured_plugins_from_stack(
         return HashMap::new();
     };
     configured_plugins_from_user_config_value(&user_layer.config)
+}
+
+fn configured_plugins_for_config(config: &PluginsConfigInput) -> HashMap<String, PluginConfig> {
+    configured_plugins_from_stack(&config.config_layer_stack)
+        .into_iter()
+        .filter(|(plugin_key, _)| {
+            PluginId::parse(plugin_key).ok().is_some_and(|plugin_id| {
+                marketplace_is_allowed(config, &plugin_id.marketplace_name)
+            })
+        })
+        .collect()
+}
+
+fn marketplace_is_allowed(config: &PluginsConfigInput, marketplace_name: &str) -> bool {
+    config
+        .config_layer_stack
+        .requirements()
+        .plugin_marketplaces
+        .as_ref()
+        .is_none_or(|requirements| requirements.value.allows_marketplace(marketplace_name))
 }
 
 fn configured_plugins_from_user_config_value(

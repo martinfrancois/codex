@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use codex_config::ConfigLayerStack;
+use codex_config::SkillSourceRequirement;
 use codex_exec_server::ExecutorFileSystem;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
@@ -123,6 +124,7 @@ impl SkillsManager {
         if !input.bundled_skills_enabled {
             roots.retain(|root| root.scope != SkillScope::System);
         }
+        retain_allowed_skill_roots(&mut roots, &input.config_layer_stack);
         roots
     }
 
@@ -173,6 +175,7 @@ impl SkillsManager {
                     }),
             );
         }
+        retain_allowed_skill_roots(&mut roots, &input.config_layer_stack);
         let skill_config_rules = skill_config_rules_from_stack(&input.config_layer_stack);
         let outcome = self.build_skill_outcome(roots, &skill_config_rules).await;
         if use_cwd_cache {
@@ -236,6 +239,31 @@ impl SkillsManager {
             Ok(cache) => cache.get(cache_key).cloned(),
             Err(err) => err.into_inner().get(cache_key).cloned(),
         }
+    }
+}
+
+fn retain_allowed_skill_roots(roots: &mut Vec<SkillRoot>, config_layer_stack: &ConfigLayerStack) {
+    let Some(requirements) = config_layer_stack.requirements().skills.as_ref() else {
+        return;
+    };
+
+    roots.retain(|root| {
+        requirements
+            .value
+            .allows_source(skill_source_for_root(root))
+    });
+}
+
+fn skill_source_for_root(root: &SkillRoot) -> SkillSourceRequirement {
+    if root.plugin_id.is_some() {
+        return SkillSourceRequirement::Plugin;
+    }
+
+    match root.scope {
+        SkillScope::Repo => SkillSourceRequirement::Repo,
+        SkillScope::User => SkillSourceRequirement::User,
+        SkillScope::System => SkillSourceRequirement::System,
+        SkillScope::Admin => SkillSourceRequirement::Admin,
     }
 }
 

@@ -105,6 +105,19 @@ impl MarketplaceRequestProcessor {
         &self,
         params: MarketplaceAddParams,
     ) -> Result<MarketplaceAddResponse, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        if !config
+            .config_layer_stack
+            .requirements()
+            .plugin_marketplaces
+            .as_ref()
+            .is_none_or(|requirements| requirements.value.allows_user_additions())
+        {
+            return Err(invalid_request(
+                "marketplace additions are disabled by managed requirements",
+            ));
+        }
+
         add_marketplace_to_codex_home(
             self.config.codex_home.to_path_buf(),
             MarketplaceAddRequest {

@@ -382,6 +382,24 @@ fn configured_plugins_from_stack(
         return HashMap::new();
     };
     configured_plugins_from_user_config_value(&user_layer.config)
+        .into_iter()
+        .filter(|(plugin_key, _)| plugin_key_is_allowed(config_layer_stack, plugin_key))
+        .collect()
+}
+
+fn plugin_key_is_allowed(config_layer_stack: &ConfigLayerStack, plugin_key: &str) -> bool {
+    let Some(requirements) = config_layer_stack
+        .requirements()
+        .plugin_marketplaces
+        .as_ref()
+    else {
+        return true;
+    };
+    PluginId::parse(plugin_key).ok().is_some_and(|plugin_id| {
+        requirements
+            .value
+            .allows_marketplace(&plugin_id.marketplace_name)
+    })
 }
 
 fn is_full_git_sha(value: &str) -> bool {
